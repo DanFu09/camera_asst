@@ -130,6 +130,25 @@ surrounding_average all_neighbors_average(
   return sa;
 }
 
+RgbPixel convolution(Image<RgbPixel>* image, float kernel[3][3], int row,
+        int col, int width, int height) {
+  float kernel_sum = 0.f;
+  RgbPixel pixel = RgbPixel();
+  for (int i = -1; i <= 1; i++) {
+    for (int j = -1; j <= 1; j++) {
+      if (row + i >= 0 && row + i < height &&
+              col + i >= 0 && col + i < width) {
+        float multiplier = kernel[1 + i][1 + i];
+        pixel += (*image)(row + i, col + i) * multiplier;
+        kernel_sum += multiplier;
+      }
+    }
+  }
+  pixel = pixel * (1.f / kernel_sum);
+
+  return pixel;
+}
+
 std::unique_ptr<Image<RgbPixel>> CameraPipeline::ProcessShot() const {
     
   // BEGIN: CS348K STUDENTS MODIFY THIS CODE
@@ -180,22 +199,16 @@ std::unique_ptr<Image<RgbPixel>> CameraPipeline::ProcessShot() const {
     
   // allocate 3-channel RGB output buffer to hold the results after processing 
   std::unique_ptr<Image<RgbPixel>> image(new Image<RgbPixel>(width, height));
-  
-  // The starter code copies the raw data from the sensor to all rgb
-  // channels. This results in a gray image that is just a
-  // visualization of the sensor's contents.
+
+  // Demosaic
   for (int row = 0; row < height; row++) {
     for (int col = 0; col < width; col++) {
       const auto val = raw_data->data(row, col);
       auto& pixel = (*image)(row, col);
 
-      if (row == 0 && col == 0) {
-        printf("%f\n", val * 255.f);
-      }
-
       if ((row % 2) == (col % 2)) {
         // This is a green pixel
-        pixel.g = val * 255.f;
+        pixel.g = val;
         
         // Calculate average of neighboring vertical and neighboring
         // horizontal photos
@@ -206,12 +219,12 @@ std::unique_ptr<Image<RgbPixel>> CameraPipeline::ProcessShot() const {
 
         if ((row % 2) == 0) {
           // vert is blue, hor is red
-          pixel.b = sa_vert.val / sa_vert.num_neighbors * 255.f;
-          pixel.r = sa_hor.val / sa_hor.num_neighbors * 255.f;
+          pixel.b = sa_vert.val / sa_vert.num_neighbors;
+          pixel.r = sa_hor.val / sa_hor.num_neighbors;
         } else {
           // vert is red, hor is blue
-          pixel.r = sa_vert.val / sa_vert.num_neighbors * 255.f;
-          pixel.b = sa_hor.val / sa_hor.num_neighbors * 255.f;
+          pixel.r = sa_vert.val / sa_vert.num_neighbors;
+          pixel.b = sa_hor.val / sa_hor.num_neighbors;
         }
 
       } else {
@@ -227,24 +240,44 @@ std::unique_ptr<Image<RgbPixel>> CameraPipeline::ProcessShot() const {
 
         if ((row % 2) == 0) {
           // this is a red pixel
-          pixel.r = val * 255.f;
+          pixel.r = val;
 
           // diagonal values are blue
-          pixel.b = diags * 255.f;
+          pixel.b = diags;
         } else {
           // this is a blue pixel
-          pixel.b = val * 255.f;
+          pixel.b = val;
 
           // diagonal values are red
-          pixel.r = diags * 255.f;
+          pixel.r = diags;
         }
 
         // non-diagonal values are always green
-        pixel.g = nondiags * 255.f;
+        pixel.g = nondiags;
       }
-      if (row == 0 && col == 0) {
-        printf("r: %f, g: %f, b: %f\n", pixel.r, pixel.g, pixel.b);
-      }
+    }
+  }
+
+  // denoise with a 3x3 blur convolution
+  float kernel[3][3] =
+    {{1./9, 1./9, 1./9}, {1./9, 1./9, 1./9}, {1./9, 1./9, 1./9}};
+  for (int row = 0; row < height; row++) {
+    for (int col = 0; col < width; col++) {
+      (*image)(row, col) = convolution(image.get(), kernel, row, col, width,
+          height);
+    }
+  }
+
+  image->GammaCorrect(0.5);
+
+  // scale up to 255
+  float scalar = 1.0;
+  for (int row = 0; row < height; row++) {
+    for (int col = 0; col < width; col++) {
+      auto& pixel = (*image)(row, col);
+      pixel.r *= scalar * 255.f; 
+      pixel.b *= scalar * 255.f; 
+      pixel.g *= scalar * 255.f; 
     }
   }
   
