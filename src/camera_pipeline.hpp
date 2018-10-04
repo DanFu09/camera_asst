@@ -4,6 +4,7 @@
 #include <limits>
 #include <memory>
 #include "camera_pipeline_interface.hpp"
+#include "camera_sensor.hpp"
 #include "image.hpp"
 #include "pixel.hpp"
 
@@ -21,7 +22,6 @@ class CameraPipeline : public CameraPipelineInterface {
 
   // BEGIN: CS348K STUDENTS MODIFY THIS CODE
   //
-  // You can add any necessary private member variables or functions.
   //
   // END: CS348K STUDENTS MODIFY THIS CODE  
 };
