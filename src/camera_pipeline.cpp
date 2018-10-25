@@ -1,5 +1,6 @@
 #include "camera_pipeline.hpp"
 #include <limits>
+#include <algorithm>
 
 typedef struct surrounding_average {
 float val;
@@ -1007,6 +1008,82 @@ calculate_alignments_and_merge(
           tile_size, tolerance, width, height);
 }
 
+void
+denoise_final_image(
+    Image<Float3Pixel>* image,
+    int width,
+    int height) {
+  std::unique_ptr<Image<RgbPixel>> image_copy(new Image<RgbPixel>(width, height));
+  copy(image_copy.get(), image, width, height);
+
+  std::vector<float> channel1;
+  std::vector<float> channel2;
+  std::vector<float> channel3;
+
+  // denoise with a median filter
+  for (int row = 0; row < height; row++) {
+    for (int col = 0; col < width; col++) {
+      int median_size = 5;
+      channel1.clear();
+      channel2.clear();
+      channel3.clear();
+      for (int i = 0; i < median_size; i++) {
+        for (int j = 0; j < median_size; j++) {
+          int offset_x = i - median_size / 2;
+          int offset_y = j - median_size / 2;
+          if (row + offset_y >= 0 && row + offset_y < height &&
+                  col + offset_x >= 0 && col + offset_x < width) {
+            channel1.push_back((*image_copy)(row + offset_y, col + offset_x).r);
+            channel2.push_back((*image_copy)(row + offset_y, col + offset_x).b);
+            channel3.push_back((*image_copy)(row + offset_y, col + offset_x).g);
+          }
+        }
+      }
+      sort(channel1.begin(), channel1.end());
+      sort(channel2.begin(), channel2.end());
+      sort(channel3.begin(), channel3.end());
+      (*image)(row, col).r = channel1.at(channel1.size() / 2);
+      (*image)(row, col).b = channel2.at(channel2.size() / 2);
+      (*image)(row, col).g = channel3.at(channel3.size() / 2);
+    }
+  } 
+  printf("Finished median filter\n");
+
+  copy(image_copy.get(), image, width, height);
+  // denoise with a 3x3 blur convolution
+  float sharpen_kernel[9] =
+    {0, -1.f, 0, -1.f, 5.f, -1.f, 0, -1.f, 0};
+  float kernel_3[9] =
+    {1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9};
+  float kernel_5[25] =
+    {1./25, 1./25, 1./25, 1./25, 1./25,
+        1./25, 1./25, 1./25, 1./25, 1./25,
+        1./25, 1./25, 1./25, 1./25, 1./25,
+        1./25, 1./25, 1./25, 1./25, 1./25,
+        1./25, 1./25, 1./25, 1./25, 1./25};
+  float gaussian_kernel_5[25] =
+  {0.003765, 0.015019, 0.023792, 0.015019, 0.003765,
+    0.015019, 0.059912, 0.094907, 0.059912, 0.015019,
+    0.023792, 0.094907, 0.150342, 0.094907, 0.023792,
+    0.015019, 0.059912, 0.094907, 0.059912, 0.015019,
+    0.003765, 0.015019, 0.023792, 0.015019, 0.003765};
+  float kernel_7[49] = 
+  {1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49};
+  //for (int row = 0; row < height; row++) {
+  //  for (int col = 0; col < width; col++) {
+  //    (*image)(row, col) = convolution(image_copy.get(), sharpen_kernel, 3,
+  //            row, col, width, height);
+  //  }
+  //}
+
+  //printf("Finished sharpening\n");
+}
 
 std::unique_ptr<Image<RgbPixel>> CameraPipeline::ProcessShot() const {
     
@@ -1058,38 +1135,7 @@ std::unique_ptr<Image<RgbPixel>> CameraPipeline::ProcessShot() const {
   local_tone_mapping(image.get(), dark_gain, bright_gain, blend_layers, 
           gamma_correction, width, height);
 
-  std::unique_ptr<Image<RgbPixel>> image_copy(new Image<RgbPixel>(width, height));
-  copy(image_copy.get(), image.get(), width, height);
-
-  // denoise with a 3x3 blur convolution
-  float kernel_3[9] =
-    {1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9};
-  float kernel_5[25] =
-    {1./25, 1./25, 1./25, 1./25, 1./25,
-        1./25, 1./25, 1./25, 1./25, 1./25,
-        1./25, 1./25, 1./25, 1./25, 1./25,
-        1./25, 1./25, 1./25, 1./25, 1./25,
-        1./25, 1./25, 1./25, 1./25, 1./25};
-  float gaussian_kernel_5[25] =
-  {0.003765, 0.015019, 0.023792, 0.015019, 0.003765,
-    0.015019, 0.059912, 0.094907, 0.059912, 0.015019,
-    0.023792, 0.094907, 0.150342, 0.094907, 0.023792,
-    0.015019, 0.059912, 0.094907, 0.059912, 0.015019,
-    0.003765, 0.015019, 0.023792, 0.015019, 0.003765};
-  float kernel_7[49] = 
-  {1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
-      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
-      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
-      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
-      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
-      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
-      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49};
-  for (int row = 0; row < height; row++) {
-    for (int col = 0; col < width; col++) {
-      (*image)(row, col) = convolution(image_copy.get(), gaussian_kernel_5, 5, row, col,
-              width, height);
-    }
-  }
+  denoise_final_image(image.get(), width, height);
 
   image->GammaCorrect(0.4);
 
