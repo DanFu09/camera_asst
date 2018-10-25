@@ -461,7 +461,7 @@ void calculate_weights(
   for (int row = 0; row < height; row++) {
     for (int col = 0; col < width; col++) {
       (*weight_map)(row, col) = (*weight_map)(row, col) *
-          pow((*l0)(row, col).y, 2);
+          pow((*l0)(row, col).y, 1);
     }
   }
 
@@ -473,7 +473,7 @@ void calculate_weights(
       float mean = (pix.r + pix.b + pix.g) / 3.f;
       float stddev = sqrt((pow(pix.r - mean, 2) + pow(pix.b - mean, 2) +
               pow(pix.g - mean, 2)) / 3.f);
-      (*weight_map)(row, col) = (*weight_map)(row, col) * stddev;
+      (*weight_map)(row, col) = (*weight_map)(row, col) * pow(stddev, 5);
     }
   }
 
@@ -1127,8 +1127,8 @@ std::unique_ptr<Image<RgbPixel>> CameraPipeline::ProcessShot() const {
  
   demosaic(image.get(), raw_data.get(), width, height); 
 
-  float dark_gain = 0.5f;
-  float bright_gain = 1.5f;
+  float dark_gain = 0.6;
+  float bright_gain = 2.0f;
   int blend_layers = 4;
   float gamma_correction = .4f;
 
