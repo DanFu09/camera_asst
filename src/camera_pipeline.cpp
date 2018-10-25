@@ -131,22 +131,19 @@ surrounding_average all_neighbors_average(
   return sa;
 }
 
-RgbPixel convolution(Image<RgbPixel>* image, float kernel[3][3], int row,
-        int col, int width, int height) {
-  float kernel_sum = 0.f;
-  RgbPixel pixel = RgbPixel();
-  for (int i = -1; i <= 1; i++) {
-    for (int j = -1; j <= 1; j++) {
+RgbPixel convolution(Image<RgbPixel>* image, float kernel[], int conv_size,
+        int row, int col, int width, int height) {
+  RgbPixel pixel = RgbPixel(0.f, 0.f, 0.f);
+  for (int i = -1 * (conv_size / 2); i <= conv_size / 2; i++) {
+    for (int j = -1 * (conv_size / 2); j <= conv_size / 2; j++) {
       if (row + i >= 0 && row + i < height &&
-              col + i >= 0 && col + i < width) {
-        float multiplier = kernel[1 + i][1 + i];
-        pixel += (*image)(row + i, col + i) * multiplier;
-        kernel_sum += multiplier;
+              col + j >= 0 && col + j < width) {
+        float multiplier = kernel[(i + conv_size / 2) * conv_size + j +
+            conv_size / 2];
+        pixel += (*image)(row + i, col + j) * multiplier;
       }
     }
   }
-  pixel = pixel * (1.f / kernel_sum);
-
   return pixel;
 }
 
@@ -193,21 +190,27 @@ void demosaic(
         
         surrounding_average sa_diags = diagonal_neighbors_average(
             raw_data, width, height, row, col, 1, 2, 1);
+        surrounding_average sa_diags_two = diagonal_neighbors_average(
+            raw_data, width, height, row, col, 2, 3, 1);
         surrounding_average sa_nondiags = nondiagonal_neighbors_average(
             raw_data, width, height, row, col, 1, 2, 1);
+        surrounding_average sa_nondiags_two = nondiagonal_neighbors_average(
+            raw_data, width, height, row, col, 2, 3, 1);
 
         float diags = sa_diags.val / sa_diags.num_neighbors; 
         float nondiags = sa_nondiags.val / sa_nondiags.num_neighbors; 
 
         if ((row % 2) == 0) {
           // this is a red pixel
-          pixel.r = val;
+          pixel.r = (val + sa_diags_two.val + sa_nondiags_two.val) / (1 +
+                  sa_diags_two.num_neighbors + sa_nondiags_two.num_neighbors);
 
           // diagonal values are blue
           pixel.b = diags;
         } else {
           // this is a blue pixel
-          pixel.b = val;
+          pixel.b = (val + sa_diags_two.val + sa_nondiags_two.val) / (1 +
+                  sa_diags_two.num_neighbors + sa_nondiags_two.num_neighbors);
 
           // diagonal values are red
           pixel.r = diags;
@@ -450,22 +453,18 @@ void calculate_weights(
   std::unique_ptr<Image<YuvPixel>> l0(new Image<YuvPixel>(width, height));
 
   to_grayscale(grayscale.get(), colors.get(), color_image, width, height);
-  
 
-  grayscale->GammaCorrect(0.4);
- 
   // Calculate laplacian
   laplacian(l0.get(), grayscale.get(), width, height);
 
   for (int row = 0; row < height; row++) {
     for (int col = 0; col < width; col++) {
-      (*weight_map)(row, col) = cross_product((*weight_map)(row, col),
-              (*l0)(row, col));
+      (*weight_map)(row, col) = (*weight_map)(row, col) *
+          pow((*l0)(row, col).y, 2);
     }
   }
 
   copy(color_copy.get(), color_image, width, height);
-  color_copy->GammaCorrect(0.4);
   // Calculate saturation
   for (int row = 0; row < height; row++) {
     for (int col = 0; col < width; col++) {
@@ -480,9 +479,11 @@ void calculate_weights(
   // Calculate well-exposedness
   for (int row = 0; row < height; row++) {
     for (int col = 0; col < width; col++) {
-      auto& pixel = (*grayscale)(row, col);
+      auto pixel = Float3Pixel::YuvToRgb((*color_copy)(row, col));
       (*weight_map)(row, col) = (*weight_map)(row, col) *
-          exp(-1 * pow(pixel.y - 0.5, 2) / (2 * 0.2 * 0.2));    
+          exp(-1 * pow(pixel.r - 0.5, 2) / (2 * 0.2 * 0.2)) *
+          exp(-1 * pow(pixel.b - 0.5, 2) / (2 * 0.2 * 0.2)) *
+          exp(-1 * pow(pixel.g - 0.5, 2) / (2 * 0.2 * 0.2));    
     }
   }
 }
@@ -580,7 +581,11 @@ void blend(
     Image<YuvPixel>* image2weight,
     int width,
     int height,
-    int layers) {
+    int layers,
+    float gamma_correction) {
+  image1->GammaCorrect(gamma_correction);
+  image2->GammaCorrect(gamma_correction);
+
   // allocate space for the Laplacian pyramids for each image
   std::vector<std::unique_ptr<Image<YuvPixel>>> image1laplacians;
   std::vector<std::unique_ptr<Image<YuvPixel>>> image2laplacians;
@@ -635,10 +640,10 @@ void blend(
         auto& weight1_pix = (*(weight1gaussians.at(i)))(row, col);
         auto& weight2_pix = (*(weight2gaussians.at(i)))(row, col);
 
-        pixel_out = cross_product(image1_pix, weight1_pix) +
-            cross_product(image2_pix, weight2_pix);
-        pixel_out = cross_product(pixel_out,
-                invert(weight1_pix + weight2_pix));
+        float weight1 = weight1_pix.y / (weight1_pix.y + weight2_pix.y);
+        float weight2 = weight2_pix.y / (weight1_pix.y + weight2_pix.y);
+
+        pixel_out = image1_pix * weight1 + image2_pix * weight2;
       }
     }
   }
@@ -649,38 +654,49 @@ void blend(
 
   printf("Flattened pyramid\n");
 
+  blended_output->GammaCorrect(1.f / gamma_correction);
+
+  image1->GammaCorrect(1.f / gamma_correction);
+  image2->GammaCorrect(1.f / gamma_correction);
 }
 
 void
 local_tone_mapping(
     Image<Float3Pixel>* image,
+    float dark_gain,
+    float bright_gain,
+    int layers,
+    float gamma_correction,
     int width,
     int height) {
   // allocate space for grayscale images
   std::unique_ptr<Image<YuvPixel>> yuv(new Image<YuvPixel>(width, height));
+  std::unique_ptr<Image<YuvPixel>> yuv_dark(new Image<YuvPixel>(width, height));
+  std::unique_ptr<Image<YuvPixel>> yuv_bright(new Image<YuvPixel>(width, height));
   std::unique_ptr<Image<YuvPixel>> dark_colors(new Image<YuvPixel>(width, height));
   std::unique_ptr<Image<YuvPixel>> dark_gray(new Image<YuvPixel>(width, height));
-  //std::unique_ptr<Image<YuvPixel>> bright_colors(new Image<YuvPixel>(width, height));
+  std::unique_ptr<Image<YuvPixel>> bright_colors(new Image<YuvPixel>(width, height));
   std::unique_ptr<Image<YuvPixel>> bright_gray(new Image<YuvPixel>(width, height));
   std::unique_ptr<Image<YuvPixel>> blended_gray(new Image<YuvPixel>(width, height));
 
   RgbToYuv(yuv.get(), image, width, height);
-  to_grayscale(dark_gray.get(), dark_colors.get(), yuv.get(), width, height);
-  scale_up_brightness(dark_gray.get(), dark_gray.get(), width, height, 0.5); 
-  //scale_up_brightness(bright_colors.get(), dark_colors.get(), width, height, 3.0);
-  scale_up_brightness(bright_gray.get(), dark_gray.get(), width, height, 3.0); 
+  scale_up_brightness(yuv_dark.get(), yuv.get(), width, height, dark_gain); 
+  scale_up_brightness(yuv_bright.get(), yuv.get(), width, height, bright_gain); 
 
   // allocate space for the weight maps
   std::unique_ptr<Image<YuvPixel>> dark_weights(new Image<YuvPixel>(width, height));
   std::unique_ptr<Image<YuvPixel>> bright_weights(new Image<YuvPixel>(width, height));
 
-  calculate_weights(dark_weights.get(), dark_gray.get(), width, height);
-  calculate_weights(bright_weights.get(), bright_gray.get(), width, height);
+  calculate_weights(dark_weights.get(), yuv_dark.get(), width, height);
+  calculate_weights(bright_weights.get(), yuv_bright.get(), width, height);
 
   printf("Weights calculated\n");
+  to_grayscale(dark_gray.get(), dark_colors.get(), yuv_dark.get(), width, height);
+  to_grayscale(bright_gray.get(), bright_colors.get(), yuv_bright.get(), width, height);
 
   blend(blended_gray.get(), dark_gray.get(), dark_weights.get(),
-          bright_gray.get(), bright_weights.get(), width, height, 4);
+          bright_gray.get(), bright_weights.get(), width, height, layers,
+          gamma_correction);
 
   printf("Blending done\n");
 
@@ -826,8 +842,8 @@ calculate_alignments(
           int start_y = best_y;
 
           // search for the best offset, tile_size in either direction
-          for (int test_x = tile_size * -1; test_x < tile_size; test_x++) {
-            for (int test_y = tile_size * -1; test_y < tile_size; test_y++) {
+          for (int test_x = tile_size * -1; test_x < tile_size * 1; test_x++) {
+            for (int test_y = tile_size * -1; test_y < tile_size * 1; test_y++) {
               // calculate the diff
               int offset_x = col + start_x + test_x;
               int offset_y = row + start_y + test_y;
@@ -915,14 +931,14 @@ merge_burst(
         float diff = 0.f;
         for (int i = 0; i < tile_size; i++) {
           for (int j = 0; j < tile_size; j++) {
-            if (row + i + offset_x < height && 
+            if (row + i + offset_y < height && 
                     row + i + offset_y >= 0 &&
                     col + j + offset_x < width &&
                     col + j + offset_x >= 0) {
-              auto& ref_data = (*ref_tile)(i, j);
+              auto& ref_data = (*ref_tile)(i, j).y;
               auto& merge_data = merge_image->data(row + i + offset_y,
                       col + j + offset_x);
-              diff += abs(ref_data.y - merge_data);
+              diff += abs(ref_data - merge_data);
             }
           }
         } 
@@ -931,7 +947,7 @@ merge_burst(
         }
         for (int i = 0; i < tile_size; i++) {
           for (int j = 0; j < tile_size; j++) {
-            if (row + i + offset_x < height && 
+            if (row + i + offset_y < height && 
                     row + i + offset_y >= 0 &&
                     col + j + offset_x < width &&
                     col + j + offset_x >= 0 &&
@@ -1034,18 +1050,47 @@ std::unique_ptr<Image<RgbPixel>> CameraPipeline::ProcessShot() const {
  
   demosaic(image.get(), raw_data.get(), width, height); 
 
-  local_tone_mapping(image.get(), width, height);
+  float dark_gain = 0.5f;
+  float bright_gain = 1.5f;
+  int blend_layers = 4;
+  float gamma_correction = .4f;
+
+  local_tone_mapping(image.get(), dark_gain, bright_gain, blend_layers, 
+          gamma_correction, width, height);
+
+  std::unique_ptr<Image<RgbPixel>> image_copy(new Image<RgbPixel>(width, height));
+  copy(image_copy.get(), image.get(), width, height);
 
   // denoise with a 3x3 blur convolution
-  float kernel[3][3] =
-    {{1./9, 1./9, 1./9}, {1./9, 1./9, 1./9}, {1./9, 1./9, 1./9}};
+  float kernel_3[9] =
+    {1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9, 1./9};
+  float kernel_5[25] =
+    {1./25, 1./25, 1./25, 1./25, 1./25,
+        1./25, 1./25, 1./25, 1./25, 1./25,
+        1./25, 1./25, 1./25, 1./25, 1./25,
+        1./25, 1./25, 1./25, 1./25, 1./25,
+        1./25, 1./25, 1./25, 1./25, 1./25};
+  float gaussian_kernel_5[25] =
+  {0.003765, 0.015019, 0.023792, 0.015019, 0.003765,
+    0.015019, 0.059912, 0.094907, 0.059912, 0.015019,
+    0.023792, 0.094907, 0.150342, 0.094907, 0.023792,
+    0.015019, 0.059912, 0.094907, 0.059912, 0.015019,
+    0.003765, 0.015019, 0.023792, 0.015019, 0.003765};
+  float kernel_7[49] = 
+  {1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49,
+      1./49, 1./49, 1./49, 1./49, 1./49, 1./49, 1./49};
   for (int row = 0; row < height; row++) {
     for (int col = 0; col < width; col++) {
-      (*image)(row, col) = convolution(image.get(), kernel, row, col, width,
-          height);
+      (*image)(row, col) = convolution(image_copy.get(), gaussian_kernel_5, 5, row, col,
+              width, height);
     }
   }
-  
+
   image->GammaCorrect(0.4);
 
   // scale up to 255
